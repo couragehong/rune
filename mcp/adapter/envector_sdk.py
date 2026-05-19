@@ -1,6 +1,6 @@
 # Summary of file: enVector SDK Adapter(enVector APIs Caller)
 
-from typing import Union, List, Dict, Any
+from typing import Union, List, Dict, Any, Optional
 import base64
 import json
 import logging
@@ -111,11 +111,13 @@ class EnVectorSDKAdapter:
             key_id: str,
             key_path: str,
             eval_mode: str,
-            query_encryption: bool,
+            query_encryption: Union[str, bool, None],
             access_token: str = None,
+            secure: Optional[bool] = None,
             auto_key_setup: bool = True,
             agent_id: str = None,
             agent_dek: bytes = None,
+            index_type: str = None,
         ):
         """
         Initializes the EnVectorSDKAdapter with an optional endpoint.
@@ -125,12 +127,14 @@ class EnVectorSDKAdapter:
             key_id (str): The key identifier for the enVector SDK.
             key_path (str): The path to the key files.
             eval_mode (str): The evaluation mode for the enVector SDK.
-            query_encryption (bool): Whether to encrypt the query vectors.
+            query_encryption (Union[str, bool, None]): pyenvector 1.4 accepts "plain"/"cipher"; legacy bool is normalized.
             access_token (str, optional): The access token for the enVector SDK.
+            secure (bool, optional): TLS toggle for pyenvector 1.4 (None = SDK default).
             auto_key_setup (bool): If True, generates keys automatically when not found.
                                    Set to False when keys are provided externally (e.g., from Vault).
             agent_id (str): Per-agent identifier for app-layer metadata encryption.
             agent_dek (bytes): Per-agent AES-256 DEK (32 bytes) for metadata encryption.
+            index_type (str, optional): Index structure type passed to ev.init() ("ivf_vct", "flat", etc.).
         """
         if not key_path:
             key_path = str(KEY_PATH)
@@ -146,9 +150,22 @@ class EnVectorSDKAdapter:
             "eval_mode": eval_mode,
             "auto_key_setup": auto_key_setup,
             "access_token": access_token,
+            "secure": secure,
+            "query_encryption": self._normalize_query_encryption(query_encryption),
         }
+        if index_type is not None:
+            self._init_params["index_type"] = index_type
 
         ev.init(**self._init_params)
+
+    @staticmethod
+    def _normalize_query_encryption(value: Union[str, bool, None]) -> str:
+        """Normalize Rune's legacy bool flag to pyenvector 1.4 string values."""
+        if value is None:
+            return "plain"
+        if isinstance(value, bool):
+            return "cipher" if value else "plain"
+        return value
 
     #--------------- Get Index List --------------#
     def call_get_index_list(self) -> Dict[str, Any]:
@@ -206,19 +223,46 @@ class EnVectorSDKAdapter:
 
     #------------------- Insert ------------------#
 
-    def call_insert(self, index_name: str, vectors: List[List[float]], metadata: List[Any] = None):
+    def call_insert(
+        self,
+        index_name: str,
+        vectors: List[List[float]],
+        metadata: List[Any] = None,
+        await_completion: bool = False,
+        use_row_insert: bool = False,
+        load: bool = True,
+        request_ids: Optional[List[str]] = None,
+    ):
         """
         Calls the enVector SDK to perform an insert operation.
 
         Args:
             vectors (List[List[float]]): The list of vectors to insert.
             metadata (List[Any], optional): The list of metadata associated with the vectors. Defaults to None.
+            await_completion (bool): Forwarded to pyenvector 1.4.3 Index.insert(await_completion=...).
+                If True, block until the server-side stage (MERGED_SAVED for the default
+                execute_until="segmentation") is reached.
+            use_row_insert (bool): If True, use single-row insert API path instead of batch path.
+            load (bool): If True, the SDK triggers Index.load() after submission (or after
+                stage-wait when await_completion=True). Set False for fully async insert paths
+                that handle load() out-of-band (e.g., pre-loaded index in logic-1 benchmarks).
+            request_ids (Optional[List[str]]): Out parameter. If provided, the SDK clears
+                this list and appends one server-generated split request_id per underlying
+                async split RPC. Required to later call wait_for_insert_stage.
 
         Returns:
             Dict[str, Any]: If succeed, converted format of the insert results. Otherwise, error message.
         """
         try:
-            results = self.invoke_insert(index_name=index_name, vectors=vectors, metadata=metadata)
+            results = self.invoke_insert(
+                index_name=index_name,
+                vectors=vectors,
+                metadata=metadata,
+                await_completion=await_completion,
+                use_row_insert=use_row_insert,
+                load=load,
+                request_ids=request_ids,
+            )
             return self._to_json_available({"ok": True, "results": results})
         except Exception as e:
             # Handle exceptions and return an appropriate error message
@@ -233,7 +277,16 @@ class EnVectorSDKAdapter:
         ct = aes_encrypt(metadata_str, self._agent_dek)
         return json.dumps({"a": self._agent_id, "c": ct})
 
-    def invoke_insert(self, index_name: str, vectors: List[List[float]], metadata: List[Any] = None):
+    def invoke_insert(
+        self,
+        index_name: str,
+        vectors: List[List[float]],
+        metadata: List[Any] = None,
+        await_completion: bool = False,
+        use_row_insert: bool = False,
+        load: bool = True,
+        request_ids: Optional[List[str]] = None,
+    ):
         """
         Invokes the enVector SDK's insert functionality.
 
@@ -241,6 +294,13 @@ class EnVectorSDKAdapter:
             index_name (str): The name of the index to insert into.
             vectors (Union[List[List[float]], List[CipherBlock]]): The list of vectors to insert.
             metadata (List[Any], optional): The list of metadata associated with the vectors. Defaults to None.
+            await_completion (bool): Forwarded to pyenvector 1.4.3 Index.insert(await_completion=...).
+                If True, block until the server-side stage (MERGED_SAVED for the default
+                execute_until="segmentation") is reached.
+            use_row_insert (bool): If True, use single-row insert API path instead of batch path.
+            load (bool): Forwarded to SDK Index.insert(load=...). Defaults to True (SDK default).
+            request_ids (Optional[List[str]]): Forwarded to SDK Index.insert(request_ids=...) as
+                an out parameter; the SDK fills it with server-generated split request_ids.
 
         Returns:
             Any: Raw insert results from the enVector SDK.
@@ -253,11 +313,85 @@ class EnVectorSDKAdapter:
                 metadata = [self._app_encrypt_metadata(m) for m in metadata]
 
         def _do_insert():
-            index = ev.Index(index_name) # Create an index instance with the given index name
-            # Insert vectors with optional metadata
-            return index.insert(data=vectors, metadata=metadata) # Return list of inserted vectors' IDs
+            index = ev.Index(index_name)
+            return index.insert(
+                data=vectors,
+                metadata=metadata,
+                request_ids=request_ids,
+                await_completion=await_completion,
+                load=load,
+                use_row_insert=use_row_insert,
+            )
 
         return self._with_reconnect(_do_insert)
+
+    #------------------- Wait for insert stage ------------------#
+
+    def call_wait_for_insert_stage(
+        self,
+        index_name: str,
+        request_ids: List[str],
+        target_stage: str = "segmentation",
+        timeout_s: float = 60.0,
+        poll_interval_s: float = 0.5,
+    ) -> Dict[str, Any]:
+        """
+        Block until all given async-insert request_ids reach target_stage on the server.
+
+        target_stage="segmentation" maps to MERGED_SAVED — the condition for searchability
+        when the index is already loaded.
+
+        Returns:
+            Dict[str, Any]: {"ok": True} on success, else {"ok": False, "error": "..."}.
+        """
+        try:
+            self.invoke_wait_for_insert_stage(
+                index_name=index_name,
+                request_ids=request_ids,
+                target_stage=target_stage,
+                timeout_s=timeout_s,
+                poll_interval_s=poll_interval_s,
+            )
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": repr(e)}
+
+    def invoke_wait_for_insert_stage(
+        self,
+        index_name: str,
+        request_ids: List[str],
+        target_stage: str = "segmentation",
+        timeout_s: float = 60.0,
+        poll_interval_s: float = 0.5,
+    ) -> None:
+        """
+        Raw call to ev.Index(name).wait_for_insert_stage(...). Raises on failure.
+        """
+        def _do_wait():
+            index = ev.Index(index_name)
+            return index.wait_for_insert_stage(
+                request_ids=request_ids,
+                target_stage=target_stage,
+                timeout_s=timeout_s,
+                poll_interval_s=poll_interval_s,
+            )
+
+        return self._with_reconnect(_do_wait)
+
+    #------------------- Load ------------------#
+
+    def call_load_index(self, index_name: str) -> Dict[str, Any]:
+        """
+        Trigger Index.load() out-of-band. Safe to call repeatedly — the SDK treats
+        "already loaded" as a no-op.
+        """
+        try:
+            def _do_load():
+                ev.Index(index_name).load()
+            self._with_reconnect(_do_load)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": repr(e)}
 
     #------------------- Scoring (Vault-Secured Pipeline) ------------------#
 

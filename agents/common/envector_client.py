@@ -7,6 +7,7 @@ Avoids MCP protocol overhead by importing adapters directly.
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -33,9 +34,12 @@ class EnVectorClient:
         key_path: str = "~/.rune/keys",
         key_id: str = None,
         access_token: Optional[str] = None,
+        secure: Optional[bool] = None,
         auto_key_setup: bool = True,
         agent_id: Optional[str] = None,
         agent_dek: Optional[bytes] = None,
+        eval_mode: str = "mm32",
+        index_type: str = "ivf_vct",
     ):
         """
         Initialize EnVector client.
@@ -45,17 +49,23 @@ class EnVectorClient:
             key_path: Path to store/load encryption keys
             key_id: Key identifier
             access_token: Cloud access token (for enVector Cloud)
+            secure: TLS toggle for pyenvector 1.4 (None = SDK default)
             auto_key_setup: Auto-generate keys if not found
             agent_id: Per-agent identifier for app-layer metadata encryption
             agent_dek: Per-agent AES-256 DEK (32 bytes) from Vault
+            eval_mode: FHE evaluation mode ("mm32" or "rmp"); overridable via ENVECTOR_EVAL_MODE
+            index_type: Index structure type ("ivf_vct" or "flat")
         """
         self._address = address
         self._key_path = Path(key_path).expanduser()
         self._key_id = key_id
         self._access_token = access_token
+        self._secure = secure
         self._auto_key_setup = auto_key_setup
         self._agent_id = agent_id
         self._agent_dek = agent_dek
+        self._eval_mode = eval_mode
+        self._index_type = index_type
         self._adapter = None
         self._initialized = False
 
@@ -74,12 +84,14 @@ class EnVectorClient:
                 address=self._address,
                 key_id=self._key_id,
                 key_path=str(self._key_path),
-                eval_mode="rmp",
-                query_encryption=False,  # Plain queries for simplicity
+                eval_mode=os.getenv("ENVECTOR_EVAL_MODE", self._eval_mode),
+                query_encryption="plain",  # Plain queries for simplicity
                 access_token=self._access_token,
+                secure=self._secure,
                 auto_key_setup=self._auto_key_setup,
                 agent_id=self._agent_id,
                 agent_dek=self._agent_dek,
+                index_type=self._index_type,
             )
             self._initialized = True
             logger.info("Connected to %s", self._address)
@@ -109,7 +121,11 @@ class EnVectorClient:
         self,
         index_name: str,
         vectors: List[List[float]],
-        metadata: Optional[List[Dict]] = None
+        metadata: Optional[List[Dict]] = None,
+        await_completion: bool = False,
+        use_row_insert: bool = False,
+        load: bool = True,
+        request_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Insert vectors into an index.
@@ -118,14 +134,26 @@ class EnVectorClient:
             index_name: Target index name
             vectors: List of embedding vectors
             metadata: Optional list of metadata dicts (one per vector)
+            await_completion: Forwarded to pyenvector 1.4.3 Index.insert(await_completion=...).
+                If True, block until the server-side stage selected by execute_until
+                (default "segmentation" → MERGED_SAVED) is reached.
+            use_row_insert: If True, use single-row insert API path (len(vectors) must be 1)
+            load: Forwarded to SDK Index.insert(load=...). Default True preserves capture-path
+                behavior. Pass False for logic-1 searchable benchmarks where load() is invoked
+                separately and the index is pre-loaded.
+            request_ids: Out parameter forwarded to SDK Index.insert(request_ids=...). When
+                provided as an empty list, the SDK appends one server-generated split rid per
+                async split RPC; callers use these to drive wait_for_insert_stage.
 
         Returns:
             Result dict with ok/error status
         """
         self._ensure_initialized()
 
+        if use_row_insert and len(vectors) != 1:
+            raise ValueError(f"use_row_insert=True requires exactly 1 vector, got {len(vectors)}")
+
         if metadata:
-            # Serialize metadata to JSON strings
             meta_list = [
                 json.dumps(m) if isinstance(m, dict) else str(m)
                 for m in metadata
@@ -136,15 +164,52 @@ class EnVectorClient:
         return self._adapter.call_insert(
             index_name=index_name,
             vectors=vectors,
-            metadata=meta_list
+            metadata=meta_list,
+            await_completion=await_completion,
+            use_row_insert=use_row_insert,
+            load=load,
+            request_ids=request_ids,
         )
+
+    def wait_for_insert_stage(
+        self,
+        index_name: str,
+        request_ids: List[str],
+        target_stage: str = "segmentation",
+        timeout_s: float = 60.0,
+        poll_interval_s: float = 0.5,
+    ) -> Dict[str, Any]:
+        """
+        Block until all given request_ids reach target_stage on the server.
+
+        target_stage="segmentation" maps to MERGED_SAVED; when the index is already
+        loaded, reaching that stage makes the inserted rows searchable.
+        """
+        self._ensure_initialized()
+        return self._adapter.call_wait_for_insert_stage(
+            index_name=index_name,
+            request_ids=request_ids,
+            target_stage=target_stage,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+        )
+
+    def load_index(self, index_name: str) -> Dict[str, Any]:
+        """Trigger Index.load() out-of-band (no-op if already loaded)."""
+        self._ensure_initialized()
+        return self._adapter.call_load_index(index_name=index_name)
 
     def insert_with_text(
         self,
         index_name: str,
         texts: List[str],
         embedding_service,
-        metadata: Optional[List[Dict]] = None
+        metadata: Optional[List[Dict]] = None,
+        *,
+        await_completion: bool = False,
+        use_row_insert: bool = False,
+        load: bool = True,
+        request_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Embed texts and insert into index.
@@ -153,23 +218,36 @@ class EnVectorClient:
             index_name: Target index name
             texts: List of texts to embed
             embedding_service: EmbeddingService instance
-            metadata: Optional list of metadata dicts
+            metadata: Optional list of metadata dicts (not mutated; "text" is
+                merged into a per-row copy when missing)
+            await_completion: Forwarded to insert(); block until segmentation stage
+            use_row_insert: Forwarded to insert(); single-row API path
+            load: Forwarded to insert(); default True preserves capture-path
+                searchability. Pass False when the index is pre-loaded out-of-band.
+            request_ids: Forwarded to insert(); SDK appends server-generated split rids
 
         Returns:
             Result dict with ok/error status
         """
-        # Generate embeddings
         vectors = embedding_service.embed(texts)
 
-        # Add text to metadata if not provided
         if metadata is None:
-            metadata = [{"text": t} for t in texts]
+            meta_list = [{"text": t} for t in texts]
         else:
-            for i, meta in enumerate(metadata):
-                if "text" not in meta:
-                    meta["text"] = texts[i]
+            meta_list = [
+                m if "text" in m else {**m, "text": texts[i]}
+                for i, m in enumerate(metadata)
+            ]
 
-        return self.insert(index_name, vectors, metadata)
+        return self.insert(
+            index_name,
+            vectors,
+            meta_list,
+            await_completion=await_completion,
+            use_row_insert=use_row_insert,
+            load=load,
+            request_ids=request_ids,
+        )
 
     def score(
         self,
