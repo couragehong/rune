@@ -76,6 +76,7 @@ type Manager struct {
 	lastBootErr atomic.Value // *domain.BootError — structured, surfaced via diagnostics
 	attempts    atomic.Int32
 	onReload    atomic.Value // func()
+	bootLog     *BootLogger  // on-disk failure log; nil = disabled (no-op)
 }
 
 // NewManager — initial state = Starting.
@@ -88,6 +89,15 @@ func NewManager() *Manager {
 	m.lastBootErr.Store((*domain.BootError)(nil))
 	return m
 }
+
+// SetBootLog injects the on-disk boot-failure logger. Called once during wiring
+// (cmd/rune-mcp). Leave unset (nil) to disable disk persistence — SetBootError
+// then only updates in-memory state. Not safe to call concurrently with boot.
+func (m *Manager) SetBootLog(bl *BootLogger) { m.bootLog = bl }
+
+// BootLog returns the injected logger (nil when disabled). Exposed so the
+// shutdown path can add it to the Closer list.
+func (m *Manager) BootLog() *BootLogger { return m.bootLog }
 
 // Current — atomic load.
 func (m *Manager) Current() State {
@@ -200,9 +210,9 @@ func (m *Manager) SetBootError(be *domain.BootError) {
 		return
 	}
 	m.lastBootErr.Store(be)
-	// Best-effort persist. PersistBootError swallows file errors so this
-	// can never break the boot loop.
-	PersistBootError(be)
+	// Best-effort persist. Persist is nil-safe and swallows file errors so
+	// this can never break the boot loop.
+	m.bootLog.Persist(be)
 }
 
 // Attempts reports the cumulative retry count from the most recent boot run

@@ -70,10 +70,9 @@ func GracefulShutdown(ctx context.Context, tracker *InflightTracker, closers []C
 		ZeroizeDEK(dek)
 	}
 
-	// Step 4 — flush + close the boot log file so the OS doesn't hold a
-	// stale fd after exit. Idempotent; safe to call even if never opened.
-	CloseBootLog()
-
+	// The boot log file is flushed + closed via the closers list (BootLogger
+	// satisfies Closer); callers pass Manager.BootLog() alongside the adapter
+	// closers. Nothing boot-log-specific to do here.
 	return nil
 }
 
