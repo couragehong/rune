@@ -242,7 +242,8 @@ class SdkAdapter(ABC):
 
         Returns {phase_name: elapsed_ms}. The phase names differ per SDK:
           * 1.2.2 — single phase, client-side score polling.
-          * 1.4.x — three phases, server lifecycle (insert_rpc/load/wait).
+          * 1.4.x — three phases, server lifecycle
+            (insert_rpc / merge_wait / publish_wait).
         Because the *mechanism* differs, the phase names are intentionally
         not unified; the comparison report places them side by side with a
         "not directly comparable" caveat.

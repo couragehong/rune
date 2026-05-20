@@ -106,7 +106,7 @@ class V122Adapter(SdkAdapter):
 
         Single phase (`insert_searchable`): v1.2.2 insert is non-blocking and
         the SDK exposes no lifecycle state, so we cannot decompose it the way
-        the 1.4.x lifecycle (insert_rpc / load / wait) allows.
+        the 1.4.x lifecycle (insert_rpc / merge_wait / publish_wait) allows.
         """
         t0 = time.perf_counter()
         # No row_insert here: this is V122Adapter calling its own insert(),

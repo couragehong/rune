@@ -158,85 +158,63 @@ class V143Adapter(SdkAdapter):
     # ── searchable measurement ────────────────────────────────────────────
 
     def searchable_phase_names(self) -> list[str]:
-        # Fixed at three phases — see measure_insert_to_searchable. This is
-        # not a stylistic choice: the current SDK only accepts the
-        # await_completion=False + load=False insert combination (bug fix
-        # pending), which forces the insert_rpc / load_index / wait_searchable
-        # decomposition.
-        return ["insert_rpc", "load_index", "wait_searchable"]
+        return ["insert_rpc", "merge_wait", "publish_wait"]
 
     async def measure_insert_to_searchable(self, ctx: SearchableCtx) -> dict:
-        """Measure insert -> SEARCHABLE latency, decomposed into three phases.
+        """Measure insert -> SEARCHABLE (done=true), three phases following
+        the cluster lifecycle raw -> MERGED_SAVED(6) -> SEARCHABLE(7).
 
-        SDK lifecycle:
-            SPLITTING -> SPLIT_COMPLETED -> MERGING -> MERGED_SAVED -> SEARCHABLE
+          insert_rpc    index.insert(execute_until="segmentation",
+                        await_completion=False, load=False, ...) — split
+                        submission; execute_until makes the server auto-queue
+                        the async merge so it is in flight by Phase B.
+          merge_wait    poll wait_for_index_operations_state(MERGED_SAVED).
+          publish_wait  index.load() (safe now — merge done) +
+                        poll wait_for_index_operations_state(SEARCHABLE).
 
-        CURRENT SDK CONSTRAINT (bug fix pending): the lifecycle docs describe
-        an insert(await_completion=True) path that blocks to MERGED_SAVED, but
-        that path is currently broken. The ONLY working insert combination
-        today is await_completion=False + load=False. The three-phase
-        decomposition below is therefore not a stylistic choice — it is the
-        only combination that runs, and it is exactly what the v1.4.3-native
-        runner already does (which is *why* the native runner diverges from
-        the docs).
+        load() ordering: calling load() between insert(load=False) and
+        merge_wait triggers a server ForwardLoadRawShard RPC the v1.4.3
+        cluster does not implement — reproduced 2026-05-20 in
+        benchmark/reports/raw/smoke_sweep_N10_stdout.log. The pre-load
+        BEFORE the timed window keeps the index loaded across iterations;
+        the in-window load() must come AFTER merge_wait.
 
-        Three phases — each wrapped in EnVectorSDKAdapter._with_reconnect:
+        The Index handle is built once outside the timed window —
+        ev.Index(name) issues server round-trips that would otherwise leak
+        into Phase A latency.
 
-          insert_rpc:   index.insert(data=[ctx.vec], metadata=[...],
-                            await_completion=False, load=False,
-                            use_row_insert=(ctx.insert_mode == "single"),
-                            request_ids=request_ids)   # out-list, SDK-filled
-          load_index:   index.load()
-          wait_searchable: index.wait_for_inserts_searchable(request_ids)
-
-        `index` is ONE Index handle built BEFORE the timed window:
-            index = ev.Index(ctx.index_name)   # build once, outside timing
-        Do NOT call ev.Index(name) inside a phase's timed block. Its
-        constructor issues server round-trips (get_index_list /
-        get_index_info), and that construction cost would leak into the
-        measured phase latency. The v1.4.3-native runner rebuilds ev.Index()
-        inside every phase — that is a measurement-accuracy flaw; reuse one
-        handle here instead of copying it.
-
-        Still to confirm on the 1.4.3 environment:
-          - wait method name + receiver: the native runner used
-            index.wait_for_inserts_searchable(request_ids); the docs say
-            index.indexer.wait_for_insert_searchable(index_name, request_ids).
-          - execute_until is MOOT while await_completion=False is forced (it
-            only takes effect with await_completion=True). Revisit only if the
-            bug is fixed and the documented 2-phase path becomes usable.
-
-        IMPORTANT: this measurement depends on the SDK bug state. Record the
-        pyenvector build / bug-fix status in the report env, so a later
-        re-measurement (post-fix, possibly via the documented await_completion
-        =True path) is not silently compared against these numbers.
-
-        Note: v122 measures this as a single phase (client polling), so the
-        v122-vs-v143 comparison is on TOTAL insert->searchable time, not
-        per-phase.
-
-        ctx.vault is unused on this path (1.4.x uses the server lifecycle, not
-        client polling). Return {phase_name: ms}; keys must match
-        searchable_phase_names().
+        Mirrors the v1.4.3-native reference runner
+        (latency_bench_v1.4.3.py:_searchable_capture_phases). ctx.vault is
+        unused on this path (1.4.x uses the server lifecycle, not client
+        polling).
         """
         import pyenvector as ev
+        from pyenvector.proto_gen.v2.common.index_operation_message_pb2 import (
+            IndexOperationState,
+        )
+
+        merged_state = IndexOperationState.Value("MERGED_SAVED")    # = 6
+        searchable_state = IndexOperationState.Value("SEARCHABLE")  # = 7
 
         sdk = self.sdk  # EnVectorSDKAdapter — for _with_reconnect
 
-        # Build the Index handle ONCE, before the timed window. ev.Index(name)
-        # issues server round-trips (get_index_list / get_index_info); building
-        # it inside a phase would leak that cost into the measured latency.
+        # Build the Index handle ONCE, before the timed window.
         index = sdk._with_reconnect(lambda: ev.Index(ctx.index_name))
+
+        # Pre-load OUTSIDE the timed window. Idempotent on an index with no
+        # raw shards; required so the post-merge load() in Phase C lands on
+        # an already-initialized index.
+        sdk._with_reconnect(index.load)
 
         meta_strs = [
             json.dumps(m) if isinstance(m, dict) else str(m)
             for m in ctx.metadata
         ]
         # request_ids is an out-list: the SDK clears it and appends one
-        # server-generated split request_id per async split RPC.
+        # server-generated request_id per async split RPC.
         request_ids: list[str] = []
 
-        # phase 1 — insert_rpc: async submit (await_completion=False, load=False)
+        # Phase A — insert_rpc
         t0 = time.perf_counter()
         sdk._with_reconnect(
             lambda: index.insert(
@@ -246,30 +224,40 @@ class V143Adapter(SdkAdapter):
                 await_completion=False,
                 load=False,
                 use_row_insert=(ctx.insert_mode == "single"),
+                execute_until="segmentation",
             )
         )
         insert_rpc_ms = (time.perf_counter() - t0) * 1000.0
 
-        # phase 2 — load_index: index.load() (no-op when already loaded)
-        t0 = time.perf_counter()
-        sdk._with_reconnect(index.load)
-        load_index_ms = (time.perf_counter() - t0) * 1000.0
-
-        # phase 3 — wait_searchable: block until the captured request_ids reach
-        # the segmentation stage (MERGED_SAVED) — i.e. become searchable.
+        # Phase B — merge_wait: poll until each request_id reaches MERGED_SAVED.
         t0 = time.perf_counter()
         sdk._with_reconnect(
-            lambda: index.wait_for_insert_stage(
-                request_ids=request_ids,
-                target_stage="segmentation",
-                timeout_s=60.0,
+            lambda: index.indexer.wait_for_index_operations_state(
+                ctx.index_name,
+                request_ids,
+                target_state=merged_state,
+                timeout_s=120.0,
                 poll_interval_s=0.5,
             )
         )
-        wait_searchable_ms = (time.perf_counter() - t0) * 1000.0
+        merge_wait_ms = (time.perf_counter() - t0) * 1000.0
+
+        # Phase C — publish_wait: load (safe now — merge done) + SEARCHABLE.
+        def _publish() -> None:
+            index.load()
+            index.indexer.wait_for_index_operations_state(
+                ctx.index_name,
+                request_ids,
+                target_state=searchable_state,
+                timeout_s=120.0,
+                poll_interval_s=0.5,
+            )
+        t0 = time.perf_counter()
+        sdk._with_reconnect(_publish)
+        publish_wait_ms = (time.perf_counter() - t0) * 1000.0
 
         return {
             "insert_rpc": insert_rpc_ms,
-            "load_index": load_index_ms,
-            "wait_searchable": wait_searchable_ms,
+            "merge_wait": merge_wait_ms,
+            "publish_wait": publish_wait_ms,
         }

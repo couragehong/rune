@@ -22,7 +22,7 @@ insert_mode:
 searchable measurement differs by SDK and is NOT directly comparable
 per-phase — only the total insert→searchable time is:
   - 1.2.2 — client-side score polling (top-1 cosine ≥ 0.999); single phase.
-  - 1.4.3 — server lifecycle, 3 phases (insert_rpc / load / wait).
+  - 1.4.3 — server lifecycle, 3 phases (insert_rpc / merge_wait / publish_wait).
 
 `--direct-envector` mode:
   - Provisions a dedicated `runebench` index instead of touching the
@@ -1011,7 +1011,7 @@ class LatencyBenchmark:
         insert->searchable segment is delegated to the adapter, whose phase
         breakdown differs by SDK version:
           - 1.2.2 -> 1 phase  (client score polling)
-          - 1.4.3 -> 3 phases (insert_rpc / load_index / wait_searchable)
+          - 1.4.3 -> 3 phases (insert_rpc / merge_wait / publish_wait)
 
         Phases: embed / score / vault_topk / <adapter searchable phases> / total
         """
