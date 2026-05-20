@@ -25,7 +25,7 @@ per-phase — only the total insert→searchable time is:
   - 1.4.3 — server lifecycle, 3 phases (insert_rpc / load / wait).
 
 `--direct-envector` mode:
-  - Provisions a dedicated `runecontext_bench` index instead of touching the
+  - Provisions a dedicated `runebench` index instead of touching the
     live `runecontext` index.
   - Drops + recreates the bench index between scenarios so each scenario's
     latency numbers start from a known empty state.
@@ -259,7 +259,7 @@ class LatencyBenchmark:
         warmup: int = 2,
         insert_mode: str = "single",
         direct_envector: bool = False,
-        bench_index_name: str = "runecontext_bench",
+        bench_index_name: str = "runebench",
     ) -> None:
         self.runs = runs
         self.warmup = warmup
@@ -1681,7 +1681,7 @@ def main() -> None:
         action="store_true",
         help=(
             "Benchmark index mode: provision a dedicated FLAT bench index "
-            "(default `runecontext_bench`), drop+recreate it between scenarios "
+            "(default `runebench`), drop+recreate it between scenarios "
             "for clean latency numbers, and prime it with 20 records before "
             "each recall scenario. Vault is still used for keys and FHE score "
             "decryption (the SecKey only lives on Vault). Does NOT touch the "
@@ -1690,8 +1690,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--bench-index",
-        default="runecontext_bench",
-        help="Bench index name (--direct-envector only, default: runecontext_bench)",
+        default="runebench",
+        help="Bench index name (--direct-envector only, default: runebench)",
     )
     parser.add_argument(
         "--primer-rows",
