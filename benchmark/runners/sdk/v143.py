@@ -1,12 +1,9 @@
 """pyenvector 1.4.3 adapter — eval_mode=mm32, index_type=ivf_vct.
 
-STATUS: SKELETON — NOT YET IMPLEMENTED.
-
-This adapter must be completed on a machine with pyenvector 1.4.3 installed.
-The v1.4.x `ev.init()` / `ev.Index.insert()` signatures cannot be verified
-from the v1.2.2 environment, so the method bodies below deliberately raise
-NotImplementedError rather than ship unverified guesses. The docstrings
-carry the implementation guidance — fill the bodies in, do not weaken them.
+Implemented and verified against pyenvector 1.4.3. The v1.4.x `ev.init()` /
+`ev.Index.insert()` call sites are exercised through EnVectorSDKAdapter
+(mcp/adapter/envector_sdk.py); the searchable measurement drives the
+ev.Index insert / load / wait_for_insert_stage lifecycle directly.
 
 Implementation reference — the v1.4.3-native runner is preserved on the
 `benchmark/envector-latency-v1.4.3` branch:
@@ -33,21 +30,27 @@ reconnect) is version-agnostic and inherited from SdkAdapter unchanged.
 
 from __future__ import annotations
 
+import json
+import time
 from typing import Optional
 
 from .base import SdkAdapter, SearchableCtx
-
-_NOT_IMPLEMENTED = (
-    "V143Adapter is a skeleton. Complete it on a machine with pyenvector "
-    "1.4.3 installed — see the v143.py module docstring for the "
-    "implementation reference (benchmark/envector-latency-v1.4.3 branch)."
-)
 
 
 class V143Adapter(SdkAdapter):
     sdk_version = "1.4.3"
     eval_mode = "mm32"
     index_type = "ivf_vct"
+    # IVF index params, fixed by the sweep plan
+    # (benchmark/plans/latency_sweep_plan.md, "Index config"). ivf_vct is NOT
+    # in production — there is no live index to mirror; nlist / default_nprobe
+    # are evaluation choices. Both are mandatory at create time: omitting
+    # nlist yields a malformed IVF index the cluster crashes on at the first
+    # insert (the bug create_index was fixed for). default_nprobe sets the
+    # crossover N (≈ default_nprobe × 4096) where ivf overtakes a flat scan.
+    # nlist=32768 is generous headroom but UNVERIFIED — probe it with
+    # create_index_probe.py before a long run (only nlist=256 is known-good).
+    index_params = {"index_type": "IVF_VCT", "nlist": 32768, "default_nprobe": 6}
 
     # ── connection ─────────────────────────────────────────────────────────
 
@@ -82,7 +85,32 @@ class V143Adapter(SdkAdapter):
         the first handshake after a fresh process can flake. Assign the
         result to self._sdk.
         """
-        raise NotImplementedError(_NOT_IMPLEMENTED)
+        from adapter.envector_sdk import EnVectorSDKAdapter
+
+        # EnVectorSDKAdapter calls ev.init() in __init__; the first handshake
+        # after a fresh process can flake, so retry the construction.
+        last_err: Optional[Exception] = None
+        for _attempt in range(5):
+            try:
+                self._sdk = EnVectorSDKAdapter(
+                    address=address,
+                    key_id=key_id,
+                    key_path=key_path,
+                    eval_mode=self.eval_mode,        # "mm32"
+                    query_encryption="plain",        # 1.4.x: string, not bool
+                    access_token=access_token,
+                    secure=secure,                   # Vault bundle envector_secure
+                    auto_key_setup=False,
+                    agent_id=agent_id,
+                    agent_dek=agent_dek,
+                    index_type=self.index_type,      # "ivf_vct"
+                )
+                return
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                time.sleep(2.0)
+        assert last_err is not None
+        raise last_err
 
     # ── data plane ─────────────────────────────────────────────────────────
 
@@ -103,7 +131,20 @@ class V143Adapter(SdkAdapter):
         `use_row_insert`, so pass `row_insert` through. Raise RuntimeError if
         the result dict reports not-ok.
         """
-        raise NotImplementedError(_NOT_IMPLEMENTED)
+        # JSON-serialise metadata dicts (as V122Adapter.insert does), then
+        # call through EnVectorSDKAdapter — v1.4.x call_insert honours
+        # use_row_insert.
+        meta_strs = [
+            json.dumps(m) if isinstance(m, dict) else str(m) for m in metadata
+        ]
+        res = self.sdk.call_insert(
+            index_name=index_name,
+            vectors=vectors,
+            metadata=meta_strs,
+            use_row_insert=row_insert,
+        )
+        if isinstance(res, dict) and not res.get("ok", True):
+            raise RuntimeError(f"insert failed: {res.get('error')}")
 
     # ── searchable measurement ────────────────────────────────────────────
 
@@ -169,4 +210,57 @@ class V143Adapter(SdkAdapter):
         client polling). Return {phase_name: ms}; keys must match
         searchable_phase_names().
         """
-        raise NotImplementedError(_NOT_IMPLEMENTED)
+        import pyenvector as ev
+
+        sdk = self.sdk  # EnVectorSDKAdapter — for _with_reconnect
+
+        # Build the Index handle ONCE, before the timed window. ev.Index(name)
+        # issues server round-trips (get_index_list / get_index_info); building
+        # it inside a phase would leak that cost into the measured latency.
+        index = sdk._with_reconnect(lambda: ev.Index(ctx.index_name))
+
+        meta_strs = [
+            json.dumps(m) if isinstance(m, dict) else str(m)
+            for m in ctx.metadata
+        ]
+        # request_ids is an out-list: the SDK clears it and appends one
+        # server-generated split request_id per async split RPC.
+        request_ids: list[str] = []
+
+        # phase 1 — insert_rpc: async submit (await_completion=False, load=False)
+        t0 = time.perf_counter()
+        sdk._with_reconnect(
+            lambda: index.insert(
+                data=[ctx.vec],
+                metadata=meta_strs,
+                request_ids=request_ids,
+                await_completion=False,
+                load=False,
+                use_row_insert=(ctx.insert_mode == "single"),
+            )
+        )
+        insert_rpc_ms = (time.perf_counter() - t0) * 1000.0
+
+        # phase 2 — load_index: index.load() (no-op when already loaded)
+        t0 = time.perf_counter()
+        sdk._with_reconnect(index.load)
+        load_index_ms = (time.perf_counter() - t0) * 1000.0
+
+        # phase 3 — wait_searchable: block until the captured request_ids reach
+        # the segmentation stage (MERGED_SAVED) — i.e. become searchable.
+        t0 = time.perf_counter()
+        sdk._with_reconnect(
+            lambda: index.wait_for_insert_stage(
+                request_ids=request_ids,
+                target_stage="segmentation",
+                timeout_s=60.0,
+                poll_interval_s=0.5,
+            )
+        )
+        wait_searchable_ms = (time.perf_counter() - t0) * 1000.0
+
+        return {
+            "insert_rpc": insert_rpc_ms,
+            "load_index": load_index_ms,
+            "wait_searchable": wait_searchable_ms,
+        }

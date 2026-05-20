@@ -26,6 +26,8 @@ class V122Adapter(SdkAdapter):
     sdk_version = "1.2.2"
     eval_mode = "rmp"
     index_type = "flat"
+    # FLAT is brute-force — no inverted lists, so no nlist / nprobe needed.
+    index_params = {"index_type": "flat"}
 
     # Top-1 cosine at/above which a just-inserted vector counts as searchable.
     _SEARCHABLE_SCORE_THRESHOLD = 0.999

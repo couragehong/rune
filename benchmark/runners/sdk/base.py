@@ -48,13 +48,18 @@ class SearchableCtx:
 
 
 class SdkAdapter(ABC):
-    """Base adapter. Subclasses declare the three class attributes below and
+    """Base adapter. Subclasses declare the four class attributes below and
     implement the abstract methods."""
 
     # Set by each concrete subclass as class attributes.
     sdk_version: str = ""       # e.g. "1.2.2"
     eval_mode: str = ""         # "rmp" | "mm32"
-    index_type: str = ""        # "flat" | "ivf_vct"
+    index_type: str = ""        # "flat" | "ivf_vct" — display / report label
+    # Exact dict passed to ev.create_index(). IVF (1.4.x) MUST carry
+    # nlist / default_nprobe — an IVF index built from index_type alone is
+    # malformed, and the cluster faults on the first insert into it. Each
+    # subclass supplies its own; see V143Adapter / V122Adapter.
+    index_params: dict = {}
 
     def __init__(self) -> None:
         # The underlying EnVectorSDKAdapter — built by connect().
@@ -111,15 +116,20 @@ class SdkAdapter(ABC):
         self.sdk._with_reconnect(lambda: ev.drop_index(index_name))
 
     def create_index(self, index_name: str, dim: int) -> None:
-        """Create a bench index. `index_type` is the version-specific knob —
-        "flat" for 1.2.2, "ivf_vct" for 1.4.x — and is set per subclass."""
+        """Create a bench index.
+
+        `index_params` is the version-specific knob, supplied per subclass.
+        For IVF (1.4.x) it MUST include nlist / default_nprobe: an IVF index
+        created from `index_type` alone is malformed, and the cluster faults
+        on the first insert into it (`get index info ... INTERNAL`).
+        """
         import pyenvector as ev
 
         def _do() -> None:
             ev.create_index(
                 index_name=index_name,
                 dim=dim,
-                index_params={"index_type": self.index_type},
+                index_params=self.index_params,
                 query_encryption="plain",
                 metadata_encryption=False,
                 metadata_key=b"",
