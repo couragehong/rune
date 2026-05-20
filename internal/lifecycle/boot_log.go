@@ -1,22 +1,8 @@
 package lifecycle
 
-// boot_log.go — append-only JSON log of boot failures (e.g. ~/.rune/logs/boot.log).
-// Complementary to lifecycle.Manager.LastBootError() (in-memory, latest only)
-// and slog (stderr / handler chain). The on-disk log is the fallback for
-// cases the structured classifier didn't fully describe — humans / admins
-// can grep across attempts.
-//
-// Design:
-//   - One JSON object per line ({ "time": ..., "kind": ..., ... })
-//   - Size-based rotation: when a write would exceed maxBytes, the current
-//     file is rotated to "<path>.1" (previous .1 overwritten) and a fresh
-//     file is opened. Two-file scheme, no external deps.
-//   - Best-effort: open/write errors do NOT propagate (logging must not
-//     take down the boot loop).
-//   - Sensitive substrings in `detail` are redacted via obs.Redact before
-//     writing — same patterns the slog handler uses.
-//   - The destination path is injected (see NewBootLogger) so callers control
-//     the root via bootstrap.Paths and tests can write to a temp dir.
+// boot_log.go — append-only JSON log of boot failures, one object per line.
+// Best-effort: open/write errors never propagate to the boot loop. detail is
+// redacted via obs.Redact before writing.
 
 import (
 	"encoding/json"
@@ -30,25 +16,20 @@ import (
 	"github.com/envector/rune-go/internal/obs"
 )
 
-// DefaultBootLogMaxBytes — rotation threshold when none is supplied.
 const DefaultBootLogMaxBytes int64 = 1 << 20 // 1 MiB
 
-// BootLogger owns the on-disk boot-failure log. Construct with NewBootLogger
-// and inject into Manager via Manager.SetBootLog. A nil *BootLogger is a safe
+// BootLogger owns the on-disk boot-failure log. A nil *BootLogger is a safe
 // no-op so callers (and tests) can leave it unset.
 type BootLogger struct {
 	mu       sync.Mutex
 	path     string
 	maxBytes int64
 	file     *os.File
-	// resolved tracks whether we've tried to open at least once — failures
-	// after that switch to silent (avoid spamming slog with the same error).
-	resolved bool
+	resolved bool // tried to open at least once; gates repeated open-error logs
 }
 
-// NewBootLogger returns a logger that appends to path, rotating at maxBytes
-// (DefaultBootLogMaxBytes when maxBytes <= 0). The file is opened lazily on
-// the first Persist call.
+// NewBootLogger appends to path, rotating at maxBytes (default when <= 0).
+// The file opens lazily on first Persist.
 func NewBootLogger(path string, maxBytes int64) *BootLogger {
 	if maxBytes <= 0 {
 		maxBytes = DefaultBootLogMaxBytes
@@ -56,8 +37,7 @@ func NewBootLogger(path string, maxBytes int64) *BootLogger {
 	return &BootLogger{path: path, maxBytes: maxBytes}
 }
 
-// bootLogEntry is the JSON shape written per line. Pinned schema so admins
-// can write scripts against it without worrying about field renames.
+// bootLogEntry is the pinned JSON shape written per line.
 type bootLogEntry struct {
 	Time     time.Time            `json:"time"`
 	Kind     domain.BootErrorKind `json:"kind"`
@@ -67,9 +47,8 @@ type bootLogEntry struct {
 	Attempts int                  `json:"attempts,omitempty"`
 }
 
-// Persist appends a JSON line describing the boot error. No-op when the
-// receiver or be is nil. Failures are swallowed (logged once via slog, then
-// silent) so the log writer can't break the boot loop.
+// Persist appends one JSON line. No-op when bl or be is nil. Open failures are
+// logged once then silent so the writer can't break the boot loop.
 func (bl *BootLogger) Persist(be *domain.BootError) {
 	if bl == nil || be == nil {
 		return
@@ -98,8 +77,6 @@ func (bl *BootLogger) Persist(be *domain.BootError) {
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
-		// json.Marshal failing on these stdlib types should be impossible,
-		// but be defensive.
 		slog.Warn("boot_log: marshal failed", "err", err)
 		return
 	}
@@ -114,8 +91,7 @@ func (bl *BootLogger) Persist(be *domain.BootError) {
 	}
 }
 
-// Close closes the underlying file. Called from graceful shutdown so the OS
-// flushes the buffer. Idempotent and nil-safe; satisfies the Closer interface.
+// Close is idempotent and nil-safe; satisfies the Closer interface.
 func (bl *BootLogger) Close() error {
 	if bl == nil {
 		return nil
@@ -130,7 +106,6 @@ func (bl *BootLogger) Close() error {
 	return nil
 }
 
-// Path returns the destination path. Nil-safe (returns "").
 func (bl *BootLogger) Path() string {
 	if bl == nil {
 		return ""
@@ -138,9 +113,8 @@ func (bl *BootLogger) Path() string {
 	return bl.path
 }
 
-// openLocked mkdir -p the logs directory + opens the log file in O_APPEND mode
-// with 0600 perms (file is owner-only since detail may contain internal
-// endpoints / error strings). Caller must hold bl.mu.
+// openLocked opens the log O_APPEND with 0600 (owner-only; detail may carry
+// internal endpoints). Caller must hold bl.mu.
 func (bl *BootLogger) openLocked() error {
 	dir := filepath.Dir(bl.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -154,10 +128,8 @@ func (bl *BootLogger) openLocked() error {
 	return nil
 }
 
-// rotateIfNeededLocked rotates the current file to "<path>.1" when appending
-// `incoming` bytes would push it past maxBytes, then reopens a fresh file. The
-// previous ".1" is overwritten (two-file scheme). Best-effort: on any error it
-// leaves bl.file as-is or nil and lets the caller skip the write. Caller must
+// rotateIfNeededLocked rotates to "<path>.1" (one generation kept) when the
+// next write would exceed maxBytes, then reopens a fresh file. Caller must
 // hold bl.mu.
 func (bl *BootLogger) rotateIfNeededLocked(incoming int64) {
 	info, err := bl.file.Stat()
@@ -169,10 +141,9 @@ func (bl *BootLogger) rotateIfNeededLocked(incoming int64) {
 	}
 	_ = bl.file.Close()
 	bl.file = nil
-	// Overwrite any prior rotation; we keep exactly one generation of history.
 	if err := os.Rename(bl.path, bl.path+".1"); err != nil {
 		slog.Warn("boot_log: rotate rename failed", "err", err, "path", bl.path)
-		// Fall through and try to reopen the original so we don't lose new writes.
+		// reopen original anyway so we don't lose new writes
 	}
 	if err := bl.openLocked(); err != nil {
 		if !bl.resolved {
