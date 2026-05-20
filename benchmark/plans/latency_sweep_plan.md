@@ -32,7 +32,7 @@ The `--direct-envector` bench index is created (`SdkAdapter.create_index` →
 |---|---|---|
 | index_type | `IVF_VCT` | |
 | dim | 1024 | `BENCH_DIM` |
-| nlist | **32768** | centroid-capacity headroom. **UNVERIFIED** — only `nlist=256` is known-good (the v1.4.3-native runner). The Step 2 probe must confirm it before any long run; fall back to 256 if it fails. |
+| nlist | **8192** | centroid-capacity headroom. **UNVERIFIED** — only `nlist=256` is known-good (the v1.4.3-native runner). The Step 2 probe must confirm it before any long run; fall back to 256 if it fails. |
 | default_nprobe | **6** | centroids probed per query → crossover N ≈ 6 × 4096 ≈ 24,576 |
 | eval_mode | `mm32` | |
 | query encryption | `plain` | metadata encryption off |
@@ -109,7 +109,7 @@ Verify the adapter loads:
 
 ### Step 2 — create_index probe + smoke test
 
-`nlist=32768` is unverified (only `nlist=256` is known-good). Before any long
+`nlist=8192` is unverified (only `nlist=256` is known-good). Before any long
 run, confirm the configured `index_params` create cleanly and survive inserts:
 
 ```

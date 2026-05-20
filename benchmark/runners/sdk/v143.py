@@ -48,9 +48,9 @@ class V143Adapter(SdkAdapter):
     # nlist yields a malformed IVF index the cluster crashes on at the first
     # insert (the bug create_index was fixed for). default_nprobe sets the
     # crossover N (≈ default_nprobe × 4096) where ivf overtakes a flat scan.
-    # nlist=32768 is generous headroom but UNVERIFIED — probe it with
+    # nlist=8192 is generous headroom but UNVERIFIED — probe it with
     # create_index_probe.py before a long run (only nlist=256 is known-good).
-    index_params = {"index_type": "IVF_VCT", "nlist": 32768, "default_nprobe": 6}
+    index_params = {"index_type": "IVF_VCT", "nlist": 8192, "default_nprobe": 6}
 
     # ── connection ─────────────────────────────────────────────────────────
 
