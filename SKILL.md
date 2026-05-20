@@ -116,9 +116,9 @@ If in Active state but operations fail:
    creds), connects to enVector, and transitions to Active.
 6. Confirm health by calling `diagnostics` and applying the
    **Boot Failure — Fast-Fail Rule** (see section below). If
-   `state == "active"`, render the per-subsystem snapshot. If
-   not, surface `vault.last_boot_error.hint` verbatim and stop —
-   do not retry, do not probe with shell tools.
+   `vault.last_boot_error` is present, surface its `hint` verbatim
+   and stop — do not retry, do not probe with shell tools. Otherwise
+   render the per-subsystem snapshot.
 
 ### `/rune:status`
 (or `$rune status` for Codex CLI)
@@ -212,10 +212,10 @@ Recommendations:
    boot loop is re-spawned; from Active it is a no-op.
 5. Call `diagnostics` and apply the **Boot Failure — Fast-Fail Rule**
    (section below).
-6. If `state == "active"`: render the per-subsystem snapshot. If not:
-   surface `vault.last_boot_error.hint` verbatim, suggest the matching
-   recovery action, and stop. Do NOT loop on `reload_pipelines` or probe
-   with shell tools — the classifier has already done that work.
+6. If `vault.last_boot_error` is present: surface its `hint` verbatim,
+   suggest the matching recovery action, and stop. Do NOT loop on
+   `reload_pipelines` or probe with shell tools — the classifier has
+   already done that work. Otherwise render the per-subsystem snapshot.
 
 ### `/rune:reset`
 (or `$rune reset` for Codex CLI)
@@ -230,9 +230,13 @@ Recommendations:
 
 ## Boot Failure — Fast-Fail Rule
 
-When `diagnostics.state != "active"` AND `diagnostics.vault.last_boot_error`
-is present, that field is the boot loop's authoritative root-cause verdict
-(produced from the underlying gRPC/TLS/DNS error). Treat it as ground truth.
+When `diagnostics.vault.last_boot_error` is present, that field is the boot
+loop's authoritative root-cause verdict (produced from the underlying
+gRPC/TLS/DNS error). It is set on every failed boot attempt and cleared only
+on success, so its presence — regardless of `state` — means boot is currently
+failing. (`state` is the persisted config value; it stays `"active"` through
+transient retries like an unreachable Vault, so it is not a reliable failure
+signal on its own.) Treat `last_boot_error` as ground truth.
 
 **Do this and stop:**
 1. Show `vault.last_boot_error.hint` to the user **verbatim** — it already

@@ -181,14 +181,14 @@ suggestion. Do NOT loop on `reload_pipelines`. Do NOT call shell tools to
 verify (`openssl`, `nc`, etc.) unless the user explicitly asks — the
 classifier has already done that work server-side.
 
-**If `state == "active"` (success path):** proceed to Step 6.
+**If no `last_boot_error` (success path):** proceed to Step 6.
 
 The diagnostics result has these sections (only render the ones with
 meaningful content) — used for the success summary in Step 6:
 
 - `state` + `dormant_reason` + `dormant_since`
 - `vault.healthy` + `vault.endpoint` (+ `vault.error` if unhealthy)
-- `vault.last_boot_error` (only when state != active — see fast-fail above)
+- `vault.last_boot_error` (whenever present — see fast-fail above)
 - `keys.enc_key_loaded` + `keys.key_id` + `keys.agent_dek_loaded`
 - `pipelines.scribe_initialized` + `pipelines.retriever_initialized`
 - `embedding.model` + `embedding.mode` + `embedding.vector_dim` (+ `embedding.daemon_version` if present)

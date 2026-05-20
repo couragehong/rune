@@ -50,12 +50,16 @@ active, ask the server to re-run the boot loop, and confirm health.
    Use a check mark for healthy items, "x" for failures with the specific
    message on the same line.
 
-7. If the boot loop succeeded (`state == "active"` and all subsystems healthy):
+7. If the boot loop succeeded (`vault.last_boot_error` absent and all
+   subsystems healthy):
    - Respond: "Rune activated. Organizational memory is now online."
 
-8. **If boot failed (state != active)** — fast-fail on `vault.last_boot_error`:
-   - Read `diagnostics.vault.last_boot_error`. If present, it already contains
-     the boot loop's classified root cause + a user-actionable hint.
+8. **If boot failed (`vault.last_boot_error` present)** — fast-fail. Note this
+   is keyed off `last_boot_error`, not `state`: a transient failure (e.g.
+   unreachable Vault) leaves the persisted `state` at `"active"` while the boot
+   loop retries, so `state` alone would miss it.
+   - Read `diagnostics.vault.last_boot_error`. It contains the boot loop's
+     classified root cause + a user-actionable hint.
    - Render the recovery in **one block** — relay the `hint` verbatim and stop:
      ```
      Activation failed — <kind>

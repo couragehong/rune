@@ -64,10 +64,12 @@ Use checkmarks for healthy items, X marks for issues.
 - `user_deactivated`: "Manually deactivated by user via `/rune:deactivate`."
 - Other/unknown: show raw reason string with "Run `/rune:activate` to retry."
 
-**Boot Error Display** (`vault.last_boot_error`): When `state != "active"` AND
-`diagnostics.vault.last_boot_error` is set, render its `hint` field
-prominently in the **Recommendations** section. The boot loop has already
-classified the root cause — relay it verbatim instead of guessing.
+**Boot Error Display** (`vault.last_boot_error`): When
+`diagnostics.vault.last_boot_error` is set (regardless of `state` — a transient
+failure keeps the persisted `state` at `"active"` while the boot loop retries),
+render its `hint` field prominently in the **Recommendations** section. The boot
+loop has already classified the root cause — relay it verbatim instead of
+guessing.
 
 Render shape (one-block, no extra investigation):
 
