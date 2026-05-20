@@ -68,18 +68,13 @@ active, ask the server to re-run the boot loop, and confirm health.
      Details: <detail>   (only when kind == "unknown" or hint is generic)
      Attempts: <attempts> (only when > 1)
      ```
-   - Common `kind` mapping for the suggestion line:
-     - `vault_tls_handshake` / `vault_tls_hostname` / `vault_ca_file` → user must
-       fix the CA cert and re-run `/rune:activate`.
-     - `vault_auth` / `vault_permission` → re-issue token with correct role,
-       then `/rune:configure`.
-     - `vault_network` / `vault_dns` → verify endpoint reachability (firewall,
-       DNS), then re-run `/rune:activate`.
-     - `embedder_unreachable` → start the `runed` daemon (`runed start`).
-     - `envector_init` / `envector_index` → contact Vault admin to verify
-       the envector endpoint / index provisioning.
-     - `vault_manifest` → token is not provisioned for an active agent. Ask
-       admin to bind the token to an agent.
+   - The `hint` is authoritative — it already names the specific fix. Relay it
+     verbatim, then suggest the matching re-run: `/rune:configure` when
+     credentials must change (auth / token / endpoint / TLS), otherwise
+     `/rune:activate` once the user applies the hint (`embedder_unreachable`
+     needs the `runed` daemon started first). The full per-`kind` table is in
+     `commands/claude/configure.md` §5 for the rare case the hint needs
+     supplementation.
    - DO NOT retry `reload_pipelines` automatically. DO NOT probe with shell
      tools. The classifier has already inspected the underlying error.
    - If `last_boot_error` is unexpectedly missing (older rune-mcp binary), fall
