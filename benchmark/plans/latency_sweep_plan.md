@@ -104,7 +104,7 @@ cluster on the first insert (`get index info ... INTERNAL`); that is fixed.
 Verify the adapter loads:
 
 ```
-.venv/bin/python -c "import sys; sys.path.insert(0,'benchmark/runners'); from runners.sdk import get_sdk_adapter; print(get_sdk_adapter().sdk_version)"
+.venv/bin/python -c "import sys; sys.path.insert(0,'benchmark'); from runners.sdk import get_sdk_adapter; print(get_sdk_adapter().sdk_version)"
 ```
 
 ### Step 2 — create_index probe + smoke test

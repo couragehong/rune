@@ -92,6 +92,16 @@ from runners.common import (  # noqa: E402
 )
 from runners.sdk import SearchableCtx, get_sdk_adapter  # noqa: E402
 
+
+# ── debug logging ──────────────────────────────────────────────────────────────
+# Timestamped stderr lines for the envector cluster crash investigation (see
+# _reset_bench_index). Mirrors runners.sdk.base._dbg; kept on stderr so debug
+# output never lands in the stdout-captured benchmark report.
+
+def _dbg(tag: str, msg: str) -> None:
+    print(f"[dbg {time.strftime('%H:%M:%S')}] {tag}: {msg}", file=sys.stderr, flush=True)
+
+
 # ── constants ─────────────────────────────────────────────────────────────────
 
 # eval_mode / index_type are no longer module constants — they are properties
@@ -260,12 +270,14 @@ class LatencyBenchmark:
         insert_mode: str = "single",
         direct_envector: bool = False,
         bench_index_name: str = "runebench",
+        sweep_mode: bool = False,
     ) -> None:
         self.runs = runs
         self.warmup = warmup
         self.insert_mode = insert_mode
         self.direct_envector = direct_envector
         self.bench_index_name = bench_index_name
+        self.sweep_mode = sweep_mode
         self._config: Any = None
         self._index_name: Optional[str] = None
         self._key_id: Optional[str] = None
@@ -473,7 +485,14 @@ class LatencyBenchmark:
         )
 
         # Clean start: drop any leftover bench index from prior runs.
-        self._reset_bench_index()
+        #
+        # Sweep mode skips this on purpose. run_sweep creates a fresh
+        # `{bench_index}_N{N}` index per grid point, so the bare bench index is
+        # never measured. And the cluster kills the *second* create_index in a
+        # process — spending the process's first create here would make the
+        # first sweep point's create fail. Each per-N create must be the first.
+        if not self.sweep_mode:
+            self._reset_bench_index()
 
         print("OK")
         print(f"    sdk        : pyenvector {self._adapter.sdk_version}")
@@ -509,13 +528,26 @@ class LatencyBenchmark:
         # _with_reconnect, so no outer reconnect wrapper is needed here.
         # create_index uses the adapter's index_type (flat for 1.2.2,
         # ivf_vct for 1.4.3).
-        if self._index_name in self._adapter.list_index_names():
+        #
+        # Log the full index listing first: if the cluster is dying because
+        # fire-and-forget drops (run_sweep / teardown) leave stale indexes
+        # piling up, the count here is the evidence.
+        existing = self._adapter.list_index_names()
+        _dbg(
+            "reset",
+            f"index={self._index_name!r} sweep_mode={self.sweep_mode} — "
+            f"cluster currently holds {len(existing)} index(es): {existing}",
+        )
+        if self._index_name in existing:
+            _dbg("reset", f"dropping pre-existing {self._index_name!r}")
             self._adapter.drop_index(self._index_name)
 
         deadline = time.monotonic() + 180.0
         saw_being_deleted = False
         last_err: Optional[Exception] = None
+        attempt = 0
         while time.monotonic() < deadline:
+            attempt += 1
             try:
                 self._adapter.create_index(self._index_name, BENCH_DIM)
                 return
@@ -524,8 +556,18 @@ class LatencyBenchmark:
                 msg = str(e).lower()
                 if "being deleted" in msg or "notready" in msg:
                     saw_being_deleted = True
+                    _dbg(
+                        "reset",
+                        f"create attempt {attempt} for {self._index_name!r} hit "
+                        f"a retryable error, sleeping 2s — {type(e).__name__}: {e}",
+                    )
                     time.sleep(2.0)
                     continue
+                _dbg(
+                    "reset",
+                    f"create attempt {attempt} for {self._index_name!r} hit a "
+                    f"NON-retryable error, raising — {type(e).__name__}: {e}",
+                )
                 raise
 
         if saw_being_deleted:
@@ -637,7 +679,18 @@ class LatencyBenchmark:
             meta = self._build_insert_metadata(
                 f"priming record {i}", f"prime-{i}", "priming"
             )
-            self._adapter.insert(self._index_name, [vec], [meta])
+            # Match the measurement path: priming uses the same insert API
+            # the scenario itself will use. On 1.4.3 the batch path
+            # (`row_insert=False`) crashes the cluster on the 5th sequential
+            # insert (benchmark/reports/raw/create_probe_*.log, 2026-05-20),
+            # so any non-trivial N priming must go via row insert when
+            # insert_mode=="single". On 1.2.2 row_insert is ignored.
+            self._adapter.insert(
+                self._index_name,
+                [vec],
+                [meta],
+                row_insert=(self.insert_mode == "single"),
+            )
 
         # Make sure the recall scenario's first score() doesn't trip on a
         # half-stable index.
@@ -1572,6 +1625,7 @@ async def _main(args: argparse.Namespace) -> None:
         insert_mode=args.insert_mode,
         direct_envector=args.direct_envector,
         bench_index_name=args.bench_index,
+        sweep_mode=bool(args.primer_rows),
     )
 
     mode_label = "bench-index" if args.direct_envector else "vault-mediated"

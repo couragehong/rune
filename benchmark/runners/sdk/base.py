@@ -23,9 +23,28 @@ V143Adapter.
 
 from __future__ import annotations
 
+import sys
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
+
+
+# ── debug logging ──────────────────────────────────────────────────────────
+#
+# The 1.4.3 envector cluster has been observed to die mid-benchmark. The
+# runner already suspects create_index — latency_bench.py _reset_bench_index /
+# run_sweep note that "the cluster kills the *second* create_index in a
+# process". `_create_index_calls` is a process-wide ordinal so a crash can be
+# pinned to an exact create call; create_index / drop_index both log through
+# `_dbg`. Output goes to stderr to stay clear of the runner's stdout progress
+# and report text — silence with `2>/dev/null` when not debugging.
+
+_create_index_calls = 0
+
+
+def _dbg(tag: str, msg: str) -> None:
+    print(f"[dbg {time.strftime('%H:%M:%S')}] {tag}: {msg}", file=sys.stderr, flush=True)
 
 
 @dataclass
@@ -113,7 +132,22 @@ class SdkAdapter(ABC):
     def drop_index(self, index_name: str) -> None:
         import pyenvector as ev
 
-        self.sdk._with_reconnect(lambda: ev.drop_index(index_name))
+        _dbg("drop_index", f"START index={index_name!r}")
+        t0 = time.perf_counter()
+        try:
+            self.sdk._with_reconnect(lambda: ev.drop_index(index_name))
+        except Exception as e:
+            _dbg(
+                "drop_index",
+                f"FAILED after {(time.perf_counter() - t0) * 1000:.0f}ms "
+                f"index={index_name!r} {type(e).__name__}: {e}",
+            )
+            raise
+        _dbg(
+            "drop_index",
+            f"OK after {(time.perf_counter() - t0) * 1000:.0f}ms "
+            f"index={index_name!r}",
+        )
 
     def create_index(self, index_name: str, dim: int) -> None:
         """Create a bench index.
@@ -125,6 +159,17 @@ class SdkAdapter(ABC):
         """
         import pyenvector as ev
 
+        # Process-wide ordinal — if the cluster dies on create #2 (the
+        # documented failure mode), this number is the first thing to check.
+        global _create_index_calls
+        _create_index_calls += 1
+        ordinal = _create_index_calls
+        _dbg(
+            "create_index",
+            f"#{ordinal} START index={index_name!r} dim={dim} "
+            f"index_params={self.index_params} sdk={self.sdk_version}",
+        )
+
         def _do() -> None:
             ev.create_index(
                 index_name=index_name,
@@ -135,7 +180,21 @@ class SdkAdapter(ABC):
                 metadata_key=b"",
             )
 
-        self.sdk._with_reconnect(_do)
+        t0 = time.perf_counter()
+        try:
+            self.sdk._with_reconnect(_do)
+        except Exception as e:
+            _dbg(
+                "create_index",
+                f"#{ordinal} FAILED after {(time.perf_counter() - t0) * 1000:.0f}ms "
+                f"index={index_name!r} {type(e).__name__}: {e}",
+            )
+            raise
+        _dbg(
+            "create_index",
+            f"#{ordinal} OK after {(time.perf_counter() - t0) * 1000:.0f}ms "
+            f"index={index_name!r}",
+        )
 
     def load_index(self, index_name: str) -> None:
         import pyenvector as ev
