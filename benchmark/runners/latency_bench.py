@@ -113,6 +113,12 @@ def _dbg(tag: str, msg: str) -> None:
 # dict here.
 BENCH_DIM = 1024
 
+# Priming batch size — rows submitted in a single adapter.prime_insert() call.
+# Confirmed stable on 1.4.3 at 4096 rows × multiple sequential batches with
+# `await_completion=True, load=True`. The final batch in a priming run carries
+# whatever remainder is left (n_records % PRIMER_BATCH_ROWS).
+PRIMER_BATCH_ROWS = 4096
+
 # Sweep scenario groups — the tokens accepted by --sweep-scenarios. Each maps
 # to one or more T-scenarios in LatencyBenchmark._run_sweep_group(). T9
 # (vault_status) and the T7 topk-scaling scan are deliberately excluded:
@@ -657,43 +663,47 @@ class LatencyBenchmark:
         """Insert deterministic random records so recall has data to score.
 
         RNG seed 0xBEEF matches the v1.4.3 reference exactly, so the priming
-        vectors are deterministic across SDK versions. The adapter's insert()
-        handles metadata JSON-encoding and app-layer encryption; we call
-        `_wait_for_score_ready` once at the end so the recall scenario starts
-        on a queryable state.
+        vectors are deterministic across SDK versions. Submission goes
+        through `adapter.prime_insert` — a batch path with
+        `await_completion=True, load=True` on 1.4.3, which keeps the cluster
+        stable across many sequential batches. Rows are chunked at
+        `PRIMER_BATCH_ROWS`; the last batch carries the remainder
+        (`n_records % PRIMER_BATCH_ROWS`). The priming path is independent
+        of `self.insert_mode`: single-insert scenarios still get a batch-
+        primed index, only the measured insert is single-row.
         """
         if not self.direct_envector:
             return
 
         rng = np.random.default_rng(0xBEEF)
 
+        n_batches = (n_records + PRIMER_BATCH_ROWS - 1) // PRIMER_BATCH_ROWS
         print(
-            f"  priming {self._index_name} with {n_records} records...",
+            f"  priming {self._index_name} with {n_records} records "
+            f"({n_batches} batch(es) of up to {PRIMER_BATCH_ROWS})...",
             end=" ", flush=True,
         )
         start = time.monotonic()
         last_vec: Optional[list] = None
-        for i in range(n_records):
-            vec = rng.standard_normal(BENCH_DIM).astype(np.float32).tolist()
-            last_vec = vec
-            meta = self._build_insert_metadata(
-                f"priming record {i}", f"prime-{i}", "priming"
-            )
-            # Match the measurement path: priming uses the same insert API
-            # the scenario itself will use. On 1.4.3 the batch path
-            # (`row_insert=False`) crashes the cluster on the 5th sequential
-            # insert (benchmark/reports/raw/create_probe_*.log, 2026-05-20),
-            # so any non-trivial N priming must go via row insert when
-            # insert_mode=="single". On 1.2.2 row_insert is ignored.
-            self._adapter.insert(
-                self._index_name,
-                [vec],
-                [meta],
-                row_insert=(self.insert_mode == "single"),
-            )
+        for batch_start in range(0, n_records, PRIMER_BATCH_ROWS):
+            batch_end = min(batch_start + PRIMER_BATCH_ROWS, n_records)
+            vectors = [
+                rng.standard_normal(BENCH_DIM).astype(np.float32).tolist()
+                for _ in range(batch_end - batch_start)
+            ]
+            metadata = [
+                self._build_insert_metadata(
+                    f"priming record {i}", f"prime-{i}", "priming"
+                )
+                for i in range(batch_start, batch_end)
+            ]
+            last_vec = vectors[-1]
+            self._adapter.prime_insert(self._index_name, vectors, metadata)
 
         # Make sure the recall scenario's first score() doesn't trip on a
-        # half-stable index.
+        # half-stable index. prime_insert already awaits the cluster on
+        # 1.4.3, but this poll is cheap when the index is already searchable
+        # and remains the only signal for 1.2.2.
         if last_vec is not None:
             self._wait_for_score_ready(last_vec)
 

@@ -155,6 +155,37 @@ class V143Adapter(SdkAdapter):
         if isinstance(res, dict) and not res.get("ok", True):
             raise RuntimeError(f"insert failed: {res.get('error')}")
 
+    # ── priming (out-of-band batch insert) ────────────────────────────────
+
+    def prime_insert(
+        self,
+        index_name: str,
+        vectors: list,
+        metadata: list,
+    ) -> None:
+        """Batch-insert priming rows with `await_completion=True, load=True`.
+
+        Priming runs outside any measured window, so it waits for the cluster
+        to absorb each batch before the next one is submitted — the only
+        combination that keeps the 1.4.3 cluster stable across many
+        sequential batches. Force `use_row_insert=False`: even when the
+        scenario itself runs in single-insert mode, priming uses the batch
+        path because that is what the stability test confirmed.
+        """
+        meta_strs = [
+            json.dumps(m) if isinstance(m, dict) else str(m) for m in metadata
+        ]
+        res = self.sdk.call_insert(
+            index_name=index_name,
+            vectors=vectors,
+            metadata=meta_strs,
+            use_row_insert=False,
+            await_completion=True,
+            load=True,
+        )
+        if isinstance(res, dict) and not res.get("ok", True):
+            raise RuntimeError(f"prime_insert failed: {res.get('error')}")
+
     # ── searchable measurement ────────────────────────────────────────────
 
     def searchable_phase_names(self) -> list[str]:

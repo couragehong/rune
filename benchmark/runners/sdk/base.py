@@ -234,6 +234,26 @@ class SdkAdapter(ABC):
         honoured on 1.4.x and ignored on 1.2.2.
         """
 
+    # ── priming (version-agnostic; v143 overrides) ────────────────────────
+
+    def prime_insert(
+        self,
+        index_name: str,
+        vectors: list,
+        metadata: list,
+    ) -> None:
+        """Insert a batch of priming rows (out-of-band, outside any measured
+        window).
+
+        Distinct from `insert()` so version-specific runners can use the most
+        reliable submission path for priming without affecting the measurement
+        path's latency profile. The base implementation simply delegates to
+        the batch `insert()` and is correct for v1.2.2. V143Adapter overrides
+        this to add `await_completion=True, load=True` so the cluster's async
+        merge has fully retired before the next batch is submitted.
+        """
+        self.insert(index_name, vectors, metadata, row_insert=False)
+
     # ── searchable measurement (mechanism differs per SDK) ─────────────────
 
     @abstractmethod
