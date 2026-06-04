@@ -34,7 +34,7 @@ jobs:
           - { runner: ubuntu-24.04-arm, os: linux,   arch: arm64 }
           - { runner: macos-14,         os: darwin,  arch: arm64 }
           - { runner: macos-14,         os: darwin,  arch: amd64 }
-          - { runner: windows-latest,   os: windows, arch: amd64 }
+          # - { runner: windows-latest,   os: windows, arch: amd64 }
     steps:
       # Setup
       - name: Resolve version
@@ -73,9 +73,10 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           MANIFEST_URL: https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/manifest.json
         run: |
-          EXT=""
-          if [ "${{ matrix.os }}" = "windows" ]; then EXT=".exe"; fi
-          ASSET="rune-${{ matrix.os }}-${{ matrix.arch }}${EXT}"
+          # EXT=""
+          # if [ "${{ matrix.os }}" = "windows" ]; then EXT=".exe"; fi
+          # ASSET="rune-${{ matrix.os }}-${{ matrix.arch }}${EXT}"
+          ASSET="rune-${{ matrix.os }}-${{ matrix.arch }}"
           mkdir -p dist
           go build -trimpath \
             -ldflags "-s -w -X main.runeVersion=${VERSION} -X main.manifestURL=${MANIFEST_URL}" \
@@ -88,9 +89,10 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          EXT=""
-          if [ "${{ matrix.os }}" = "windows" ]; then EXT=".exe"; fi
-          BIN="./dist/rune-${{ matrix.os }}-${{ matrix.arch }}${EXT}"
+          # EXT=""
+          # if [ "${{ matrix.os }}" = "windows" ]; then EXT=".exe"; fi
+          # BIN="./dist/rune-${{ matrix.os }}-${{ matrix.arch }}${EXT}"
+          BIN="./dist/rune-${{ matrix.os }}-${{ matrix.arch }}"
           chmod +x "$BIN" 2>/dev/null || true
           OUT="$("$BIN" version)"
           echo "$OUT"
@@ -311,7 +313,7 @@ jobs:
             dist/rune-linux-arm64
             dist/rune-darwin-amd64
             dist/rune-darwin-arm64
-            dist/rune-windows-amd64.exe
+            # dist/rune-windows-amd64.exe
             dist/checksums.txt
             dist/manifest.json
           fail_on_unmatched_files: true
