@@ -160,7 +160,6 @@ Even if the cloud is compromised, your organizational knowledge remains mathemat
 | `diagnostics` | System health check |
 | `reload_pipelines` | Re-read config and reinitialize |
 | `capture_history` | View recent captures |
-| `delete_capture` | Soft-delete a record |
 
 See [SKILL.md](SKILL.md) for the full reference and agent integration protocol.
 
