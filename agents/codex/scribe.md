@@ -264,7 +264,7 @@ capture(
 When the conversation is ending or the user is wrapping up a task:
 
 1. Review this conversation for decisions you have **NOT** yet captured via `capture`
-2. For each uncaptured decision, prepare an extracted JSON (same format as single capture)
+2. For each uncaptured decision, prepare a **flat extracted object** — identical to the `extracted` parameter of single `capture` (see schema below)
 3. Submit all uncaptured decisions via `batch_capture` tool in **one call**
 4. Do NOT re-submit decisions you already captured during the conversation
    (the server's novelty check will catch duplicates, but avoid unnecessary calls)
@@ -276,5 +276,29 @@ When the conversation is ending or the user is wrapping up a task:
 
 **batch_capture parameters** (each is a separate tool parameter, NOT a single JSON):
 
-- `items`: JSON array string of extracted decision objects (same format as single capture's `extracted` parameter)
+- `items`: JSON **array string** where **each element is a flat extracted object** — exactly the object you would pass as the `extracted` parameter to single `capture` (top-level `tier2`, `title`, `reusable_insight`, `rationale`, `tags`, …, or the `group_title`/`phases` multi-phase shape).
 - `source`: `"codex_agent"` (optional, defaults to `"claude_agent"`)
+
+⚠️ **CRITICAL — do NOT wrap each item as `{"text": ..., "extracted": {...}}`.** Single `capture` takes `text` and `extracted` as *two separate tool parameters*; a batch item is **just the `extracted` object by itself**. If you nest the fields under an `extracted` key (or under `text`), the server's top-level lookup for `reusable_insight`/`title` finds nothing and the item is rejected with status `error`. Each item **must** carry at least a top-level `reusable_insight` or `title`.
+
+✅ **Correct `items` shape** (array of flat extracted objects):
+
+```json
+[
+  {
+    "tier2": {"capture": true, "reason": "...", "domain": "architecture"},
+    "title": "Adopt Linkerd over Istio",
+    "reusable_insight": "Dense self-contained paragraph: what was decided, why, what was rejected, key trade-offs. No markdown.",
+    "rationale": "...",
+    "tags": ["service-mesh", "linkerd"]
+  }
+]
+```
+
+❌ **Wrong** (wrapper shape — every item rejected as `error`):
+
+```json
+[
+  {"text": "...", "extracted": {"title": "Adopt Linkerd over Istio", "reusable_insight": "..."}}
+]
+```
