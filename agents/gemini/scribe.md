@@ -279,7 +279,7 @@ When the conversation is ending or the user is wrapping up a task:
 - `items`: JSON **array string** where **each element is a flat extracted object** — exactly the object you would pass as the `extracted` parameter to single `capture` (top-level `tier2`, `title`, `reusable_insight`, `rationale`, `tags`, …, or the `group_title`/`phases` multi-phase shape).
 - `source`: `"gemini_agent"` (optional, defaults to `"claude_agent"`)
 
-⚠️ **CRITICAL — do NOT wrap each item as `{"text": ..., "extracted": {...}}`.** Single `capture` takes `text` and `extracted` as *two separate tool parameters*; a batch item is **just the `extracted` object by itself**. If you nest the fields under an `extracted` key (or under `text`), the server's top-level lookup for `reusable_insight`/`title` finds nothing and the item is rejected with status `error`. Each item **must** carry at least a top-level `reusable_insight` or `title`.
+⚠️ **CRITICAL — do NOT wrap each item as `{"text": ..., "extracted": {...}}`.** Single `capture` takes `text` and `extracted` as *two separate tool parameters*; a batch item is **just the `extracted` object by itself**. If you nest the fields under an `extracted` key (or under `text`), the server's top-level lookup for `reusable_insight`/`title`/`group_title` finds nothing and the item is rejected with status `error`. Each item **must** carry at least a top-level `reusable_insight`, `title`, or `group_title` (the multi-phase shape supplies `group_title`).
 
 ✅ **Correct `items` shape** (array of flat extracted objects):
 
