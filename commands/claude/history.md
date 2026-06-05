@@ -28,6 +28,3 @@ Timestamp            | Record ID                        | Title                 
 
 3. If no entries found:
    - "No captures recorded yet. Rune captures decisions automatically during conversations."
-
-4. Show tip at the bottom:
-   - "Use `/rune:delete <record_id>` to remove a capture."
