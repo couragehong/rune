@@ -30,6 +30,53 @@ func newDownloadTransport() *http.Transport {
 
 type ProgressFunc func(downloaded, total int64)
 
+// maxDownloadAttempts caps retries for a single network fetch (manifest
+// or artifact). A transient blip — most notably a GitHub CDN 504 during
+// install — recovers within a couple of attempts; beyond that the
+// failure is most likely persistent (wrong SHA, missing asset) where
+// further retries only add latency.
+const maxDownloadAttempts = 3
+
+// downloadRetryBackoff is the initial wait between attempts; it is
+// multiplied by retryBackoffMultiplier each retry so a transient blip
+// recovers quickly while a server-side cold-start has time to warm up.
+// var so tests can compress the real waits.
+var downloadRetryBackoff = 2 * time.Second
+
+const retryBackoffMultiplier = 3
+
+// withRetry runs fn up to maxDownloadAttempts times with bounded
+// exponential backoff so a transient network failure (e.g. a GitHub CDN
+// 504) surfaces as a retry rather than a hard install failure. ctx
+// cancellation aborts immediately without burning the remaining
+// attempts. logf may be nil.
+func withRetry(ctx context.Context, logf func(string, ...any), label string, fn func() error) error {
+	var lastErr error
+	backoff := downloadRetryBackoff
+	for attempt := 1; attempt <= maxDownloadAttempts; attempt++ {
+		if attempt > 1 {
+			if logf != nil {
+				logf("retrying %s (attempt %d/%d) after %s: %v", label, attempt, maxDownloadAttempts, backoff, lastErr)
+			}
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return fmt.Errorf("%s: retry aborted: %w", label, ctx.Err())
+			}
+			backoff *= retryBackoffMultiplier
+		}
+		if err := fn(); err != nil {
+			if ctx.Err() != nil {
+				return err
+			}
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("%s: failed after %d attempts: %w", label, maxDownloadAttempts, lastErr)
+}
+
 func DownloadAndVerify(ctx context.Context, spec ArtifactSpec, destPath string, progress ProgressFunc) error {
 	if spec.URL == "" || spec.SHA256 == "" {
 		return errors.New("download: spec missing url or sha256")

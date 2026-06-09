@@ -54,7 +54,7 @@ var (
 	ErrNoArtifactForPlatform      = errors.New("manifest: no artifacts for this platform")
 )
 
-func FetchManifest(ctx context.Context, manifestURL string) (*Manifest, error) {
+func FetchManifest(ctx context.Context, manifestURL string, logf func(string, ...any)) (*Manifest, error) {
 	if v := os.Getenv(envManifest); v != "" {
 		manifestURL = v
 	}
@@ -62,6 +62,37 @@ func FetchManifest(ctx context.Context, manifestURL string) (*Manifest, error) {
 		return nil, errors.New("manifest: no URL provided (default missing; set RUNE_MANIFEST?)")
 	}
 
+	// Only the network fetch is retried; a transient GitHub CDN 504 should
+	// not abort install, but a parse/version error below is deterministic
+	// and retrying it would just waste the backoff budget.
+	var body []byte
+	if err := withRetry(ctx, logf, "fetch manifest", func() error {
+		var ferr error
+		body, ferr = fetchManifestBody(ctx, manifestURL)
+		return ferr
+	}); err != nil {
+		return nil, err
+	}
+
+	var m Manifest
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
+		return nil, fmt.Errorf("manifest: parse JSON: %w", err)
+	}
+	if m.Version != ManifestVersion {
+		return nil, fmt.Errorf("%w: got %d, want %d", ErrUnsupportedManifestVersion, m.Version, ManifestVersion)
+	}
+	if len(m.Platforms) == 0 {
+		return nil, errors.New("manifest: platforms is empty")
+	}
+
+	return &m, nil
+}
+
+// fetchManifestBody performs a single manifest GET and returns the raw
+// body. It is the retryable unit wrapped by FetchManifest's withRetry.
+func fetchManifestBody(ctx context.Context, manifestURL string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, defaultManifestFetchTimeout)
 	defer cancel()
 
@@ -88,20 +119,7 @@ func FetchManifest(ctx context.Context, manifestURL string) (*Manifest, error) {
 		return nil, fmt.Errorf("manifest: body exceeds %d bytes", maxBody)
 	}
 
-	var m Manifest
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&m); err != nil {
-		return nil, fmt.Errorf("manifest: parse JSON: %w", err)
-	}
-	if m.Version != ManifestVersion {
-		return nil, fmt.Errorf("%w: got %d, want %d", ErrUnsupportedManifestVersion, m.Version, ManifestVersion)
-	}
-	if len(m.Platforms) == 0 {
-		return nil, errors.New("manifest: platforms is empty")
-	}
-
-	return &m, nil
+	return body, nil
 }
 
 func (m *Manifest) ArtifactsForCurrentPlatform() (PlatformArtifacts, error) {

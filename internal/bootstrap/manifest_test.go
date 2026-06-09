@@ -8,7 +8,17 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+// fastRetry compresses the retry backoff so tests that exercise the retry
+// path don't sleep for real seconds. It restores the original on cleanup.
+func fastRetry(t *testing.T) {
+	t.Helper()
+	orig := downloadRetryBackoff
+	downloadRetryBackoff = time.Millisecond
+	t.Cleanup(func() { downloadRetryBackoff = orig })
+}
 
 func fullManifestJSON(extraFields string) string {
 	return fmt.Sprintf(`{
@@ -31,7 +41,7 @@ func TestFetchManifest_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m, err := FetchManifest(context.Background(), srv.URL)
+	m, err := FetchManifest(context.Background(), srv.URL, nil)
 	if err != nil {
 		t.Fatalf("FetchManifest: %v", err)
 	}
@@ -66,7 +76,7 @@ func TestFetchManifest_EnvOverride(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv(envManifest, srv.URL)
-	if _, err := FetchManifest(context.Background(), "https://default/manifest.json"); err != nil {
+	if _, err := FetchManifest(context.Background(), "https://default/manifest.json", nil); err != nil {
 		t.Fatalf("FetchManifest: %v", err)
 	}
 	if !served {
@@ -81,7 +91,7 @@ func TestFetchManifest_RejectsUnsupportedVersion(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := FetchManifest(context.Background(), srv.URL)
+	_, err := FetchManifest(context.Background(), srv.URL, nil)
 	if !errors.Is(err, ErrUnsupportedManifestVersion) {
 		t.Fatalf("want ErrUnsupportedManifestVersion, got %v", err)
 	}
@@ -94,7 +104,7 @@ func TestFetchManifest_RejectsEmptyPlatforms(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := FetchManifest(context.Background(), srv.URL)
+	_, err := FetchManifest(context.Background(), srv.URL, nil)
 	if err == nil || !strings.Contains(err.Error(), "platforms is empty") {
 		t.Errorf("want empty-platforms error, got %v", err)
 	}
@@ -106,21 +116,50 @@ func TestFetchManifest_RejectsUnknownFields(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := FetchManifest(context.Background(), srv.URL)
+	_, err := FetchManifest(context.Background(), srv.URL, nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Errorf("want unknown-field rejection, got %v", err)
 	}
 }
 
 func TestFetchManifest_HTTPError(t *testing.T) {
+	fastRetry(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
 	defer srv.Close()
 
-	_, err := FetchManifest(context.Background(), srv.URL)
+	_, err := FetchManifest(context.Background(), srv.URL, nil)
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Errorf("want HTTP 404, got %v", err)
+	}
+}
+
+// TestFetchManifest_RetriesTransient verifies a transient 5xx (e.g. a
+// GitHub CDN 504) is retried and the fetch ultimately succeeds.
+func TestFetchManifest_RetriesTransient(t *testing.T) {
+	fastRetry(t)
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fullManifestJSON("")))
+	}))
+	defer srv.Close()
+
+	m, err := FetchManifest(context.Background(), srv.URL, nil)
+	if err != nil {
+		t.Fatalf("FetchManifest after transient 504s: %v", err)
+	}
+	if m.Version != 1 {
+		t.Errorf("Version = %d, want 1", m.Version)
+	}
+	if attempts != 3 {
+		t.Errorf("attempts = %d, want 3 (two 504s then success)", attempts)
 	}
 }
 

@@ -76,7 +76,7 @@ func Install(ctx context.Context, opts InstallOptions) (*Result, error) {
 
 	// Fetch manifest
 	logf("[1/%d] manifest: fetching from %s", total, opts.ManifestURL)
-	manifest, err := FetchManifest(ctx, opts.ManifestURL)
+	manifest, err := FetchManifest(ctx, opts.ManifestURL, logf)
 	if err != nil {
 		r.Failed[StepManifest] = err.Error()
 		r.Status = "partial"
@@ -123,7 +123,7 @@ func Install(ctx context.Context, opts InstallOptions) (*Result, error) {
 		}
 
 		logf("[%d/%d] %s (%d bytes): downloading...", stepNum, total, in.step, in.spec.Size)
-		if err := installArtifact(ctx, paths, in.spec, in.dest, opts.Progress); err != nil {
+		if err := installArtifact(ctx, paths, in.spec, in.dest, opts.Progress, logf); err != nil {
 			r.Failed[in.step] = err.Error()
 			r.Status = "partial"
 			return r, err
@@ -198,10 +198,12 @@ func onlySkipped(r *Result) bool {
 // spec.Extract == ""      : raw binaries are downloaded directly to dest
 // spec.Extract == "tar.gz": archive is extracted into dest
 // Others treat as error
-func installArtifact(ctx context.Context, paths *Paths, spec ArtifactSpec, dest string, progress ProgressFunc) error {
+func installArtifact(ctx context.Context, paths *Paths, spec ArtifactSpec, dest string, progress ProgressFunc, logf func(string, ...any)) error {
 	switch spec.Extract {
 	case "": // raw binaries
-		if err := DownloadAndVerify(ctx, spec, dest, progress); err != nil {
+		if err := withRetry(ctx, logf, "download "+filepath.Base(dest), func() error {
+			return DownloadAndVerify(ctx, spec, dest, progress)
+		}); err != nil {
 			return err
 		}
 		if err := os.Chmod(dest, binaryMode); err != nil {
@@ -212,7 +214,9 @@ func installArtifact(ctx context.Context, paths *Paths, spec ArtifactSpec, dest 
 	case "tar.gz": // Tarball archive
 		// Download archive under paths.Cache first
 		tarPath := filepath.Join(paths.Cache, filepath.Base(dest)+".tar.gz")
-		if err := DownloadAndVerify(ctx, spec, tarPath, progress); err != nil {
+		if err := withRetry(ctx, logf, "download "+filepath.Base(dest), func() error {
+			return DownloadAndVerify(ctx, spec, tarPath, progress)
+		}); err != nil {
 			return err
 		}
 		defer os.Remove(tarPath)
